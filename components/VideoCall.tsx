@@ -417,6 +417,16 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
       </Button>
 
       <Button
+        variant="secondary"
+        size="icon"
+        onClick={toggleCamera}
+        title="Switch camera"
+        disabled={isVoiceOnly || !localStream}
+      >
+        <RefreshCw size={20} />
+      </Button>
+
+      <Button
         variant="destructive"
         size="icon"
         onClick={endCall}
