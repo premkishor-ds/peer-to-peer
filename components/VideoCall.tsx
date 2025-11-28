@@ -219,8 +219,18 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
   // Watch for remote stream changes
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
+      console.log('Remote stream tracks:', {
+        audio: remoteStream.getAudioTracks().length,
+        video: remoteStream.getVideoTracks().length,
+      });
+
+      // Make sure incoming tracks are enabled
+      remoteStream.getAudioTracks().forEach((t) => (t.enabled = true));
+      remoteStream.getVideoTracks().forEach((t) => (t.enabled = true));
+
       const videoEl = remoteVideoRef.current;
       videoEl.srcObject = remoteStream;
+      videoEl.muted = false;
 
       // Some browsers require an explicit play() after a user gesture
       const playPromise = videoEl.play();
