@@ -25,9 +25,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
   // Controls
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isVoiceOnly, setIsVoiceOnly] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [statusMsg, setStatusMsg] = useState('Initializing secure node...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pendingCallType, setPendingCallType] = useState<'audio' | 'video' | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -56,7 +58,15 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
     setErrorMsg(null);
     setStatusMsg('Connecting to secure network...');
     
-    const newPeer = new Peer(user.id, PEER_CONFIG);
+    const newPeer = new Peer(user.id, {
+      ...PEER_CONFIG,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+      },
+    });
 
     newPeer.on('open', (id) => {
       console.log('My peer ID is: ' + id);
@@ -73,18 +83,26 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
     });
 
     newPeer.on('error', (err) => {
-      console.error('Peer error:', err);
       if (err.type === 'peer-unavailable') {
         setErrorMsg(`User ${user.targetId} is not online.`);
         setStatusMsg('Target node offline.');
         setConnState('idle');
-        // Reset calling state after delay
         setTimeout(() => setErrorMsg(null), 3000);
       } else if (err.type === 'unavailable-id') {
-        setErrorMsg('ID is taken. Are you already logged in elsewhere?');
+        setErrorMsg('This ID is already in use. Close other sessions or try again in a moment.');
+        setStatusMsg('ID already in use');
+      } else if (err.type === 'network') {
+        setErrorMsg('Network error. Please check your internet connection.');
+        setStatusMsg('Network error');
       } else {
         setErrorMsg(`Connection Error: ${err.type}`);
       }
+    });
+
+    newPeer.on('disconnected', () => {
+      console.log('Peer disconnected.');
+      setStatusMsg('Connection lost.');
+      setErrorMsg('Connection lost. Please refresh or try again.');
     });
 
     setPeer(newPeer);
@@ -94,78 +112,108 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
     };
   }, [user.id, user.username, user.targetId]);
 
-  // Handle Local Stream (Camera)
-  const initLocalStream = useCallback(async (overrideFacingMode?: 'user' | 'environment') => {
+  // Handle Local Stream (Camera / Mic)
+  const initLocalStream = useCallback(async (
+    overrideFacingMode?: 'user' | 'environment',
+    forceVoiceOnly?: boolean
+  ) => {
     try {
+      // Basic support check so we can show a clear message instead of a generic error
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setErrorMsg('This browser does not support camera/microphone access.');
+        setStatusMsg('Media not supported');
+        return;
+      }
+
       const mode = overrideFacingMode || facingMode;
-      
-      // STOP previous tracks first - crucial for mobile devices that can't handle multiple streams
+      const voiceOnly = forceVoiceOnly ?? isVoiceOnly;
+
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
 
-      console.log(`Requesting camera with facingMode: ${mode}`);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          facingMode: mode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: true
-      });
+      const constraints: MediaStreamConstraints = {
+        audio: true,
+        video: !voiceOnly
+          ? {
+              facingMode: mode,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            }
+          : false,
+      };
 
-      // Apply current mute/video-off states
-      stream.getAudioTracks().forEach(t => t.enabled = !isMutedRef.current);
-      stream.getVideoTracks().forEach(t => t.enabled = !isVideoOffRef.current);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
-      setLocalStream(stream);
-      localStreamRef.current = stream;
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-
-      // If in active call, replace tracks
-      if (activeCallRef.current && activeCallRef.current.peerConnection) {
-        const senders = activeCallRef.current.peerConnection.getSenders();
-        
-        const videoTrack = stream.getVideoTracks()[0];
-        const audioTrack = stream.getAudioTracks()[0];
-
-        if (videoTrack) {
-          const videoSender = senders.find((s) => s.track?.kind === 'video');
-          if (videoSender) {
-            console.log('Replacing video track...');
-            await videoSender.replaceTrack(videoTrack);
-          }
+        stream.getAudioTracks().forEach((t) => (t.enabled = !isMutedRef.current));
+        if (!voiceOnly) {
+          stream.getVideoTracks().forEach((t) => (t.enabled = !isVideoOffRef.current));
         }
-        
-        if (audioTrack) {
+
+        setLocalStream(stream);
+        localStreamRef.current = stream;
+
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+
+        if (activeCallRef.current && activeCallRef.current.peerConnection) {
+          const senders = activeCallRef.current.peerConnection.getSenders();
+
+          const videoTrack = stream.getVideoTracks()[0];
+          const audioTrack = stream.getAudioTracks()[0];
+
+          if (videoTrack) {
+            const videoSender = senders.find((s) => s.track?.kind === 'video');
+            if (videoSender) {
+              await videoSender.replaceTrack(videoTrack);
+            }
+          }
+
+          if (audioTrack) {
             const audioSender = senders.find((s) => s.track?.kind === 'audio');
             if (audioSender) {
-              console.log('Replacing audio track...');
               await audioSender.replaceTrack(audioTrack);
             }
+          }
+        }
+      } catch (err: any) {
+        if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          // No camera: if we were trying to use video, inform once and fall back to audio-only.
+          if (!voiceOnly) {
+            setErrorMsg('No camera available. Switching to audio-only.');
+          }
+          const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          setLocalStream(audioStream);
+          localStreamRef.current = audioStream;
+          setIsVoiceOnly(true);
+
+        } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          setErrorMsg('Camera/microphone access was denied. Please allow permissions.');
+        } else if (err.name === 'NotReadableError') {
+          setErrorMsg('Camera/microphone is already in use by another application.');
+        } else {
+          setErrorMsg(`Failed to access media devices: ${err.message || 'Unknown error'}`);
+        }
+
+        if (!voiceOnly) {
+          setStatusMsg('Media Error');
         }
       }
-
     } catch (err) {
-      console.error("Failed to get local stream", err);
-      setErrorMsg('Camera access failed. Please allow permissions.');
-      setStatusMsg('Camera Error');
+      setErrorMsg('Could not access media devices. Please check browser permissions or try another browser.');
+      setStatusMsg('Media error');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [facingMode]); // activeCallRef used inside
+  }, [facingMode, isVoiceOnly]);
 
-  // Start stream on mount
+  // Cleanup media tracks on unmount
   useEffect(() => {
-    initLocalStream();
     return () => {
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(t => t.stop());
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Watch for remote stream changes
@@ -180,7 +228,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
     const newMode = facingMode === 'user' ? 'environment' : 'user';
     setFacingMode(newMode);
     // Explicitly call init with new mode
-    await initLocalStream(newMode);
+    await initLocalStream(newMode, false);
   };
 
   const toggleMute = () => {
@@ -192,38 +240,73 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
     }
   };
 
-  const toggleVideo = () => {
-    if (localStream) {
-      localStream.getVideoTracks().forEach(track => {
-        track.enabled = !track.enabled;
-      });
-      setIsVideoOff(!isVideoOff);
+  const toggleVideo = useCallback(async () => {
+    if (!localStream) return;
+    
+    const videoTrack = localStream.getVideoTracks()[0];
+    if (videoTrack) {
+      const newState = !videoTrack.enabled;
+      videoTrack.enabled = newState;
+      setIsVideoOff(!newState);
+      
+      // If enabling video and in voice-only mode, turn off voice-only mode
+      if (newState && isVoiceOnly) {
+        setIsVoiceOnly(false);
+      }
     }
-  };
+  }, [localStream, isVoiceOnly]);
+
+  const toggleVoiceOnly = useCallback(async () => {
+    if (!localStream) return;
+    
+    const newVoiceOnlyState = !isVoiceOnly;
+    setIsVoiceOnly(newVoiceOnlyState);
+    
+    // If enabling voice-only mode, turn off video
+    if (newVoiceOnlyState) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (videoTrack && videoTrack.enabled) {
+        videoTrack.enabled = false;
+        setIsVideoOff(true);
+      }
+    }
+  }, [localStream, isVoiceOnly]);
 
   const startCall = () => {
-    if (!peer || !localStream) {
-        console.warn('Cannot start call: Peer or Stream not ready');
-        return;
+    const stream = localStreamRef.current;
+    if (!peer || !stream) {
+      console.warn('Cannot start call: Peer or Stream not ready');
+      return;
     }
     if (!peerId) {
-        setErrorMsg('Network initializing... please wait.');
-        return;
+      setErrorMsg('Network initializing... please wait.');
+      return;
     }
 
     setStatusMsg(`Calling ${user.targetId}...`);
     setConnState('calling');
-    
-    const call = peer.call(user.targetId, localStream);
+
+    const call = peer.call(user.targetId, stream);
     handleCallEvents(call);
     setActiveCall(call);
   };
 
-  const answerCall = () => {
-    if (!incomingCall || !localStream) return;
-    
+  const answerCall = async () => {
+    if (!incomingCall) return;
+
+    // Ensure we have a local stream before answering
+    let stream = localStream;
+    if (!stream) {
+      await initLocalStream();
+      stream = localStreamRef.current;
+    }
+    if (!stream) {
+      setErrorMsg('Unable to access microphone/camera to answer the call.');
+      return;
+    }
+
     setStatusMsg('Connecting...');
-    incomingCall.answer(localStream);
+    incomingCall.answer(stream);
     handleCallEvents(incomingCall);
     setActiveCall(incomingCall);
     setIncomingCall(null);
@@ -258,14 +341,93 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
       endCall();
     });
 
-    call.on('error', (err) => {
-      console.error('Call error:', err);
+    call.on('error', () => {
       endCall();
       setErrorMsg('Call Disconnected');
     });
   };
 
+  const handleStartVoiceCall = async () => {
+    setIsVoiceOnly(true);
+    setIsVideoOff(true);
+    // Force pure audio-only stream so we never even try to access a camera
+    await initLocalStream(undefined, true);
+    if (localStreamRef.current) {
+      startCall();
+    }
+  };
+
+  const handleStartVideoCall = async () => {
+    setIsVoiceOnly(false);
+    setIsVideoOff(false);
+    await initLocalStream(undefined, false);
+    if (localStreamRef.current) {
+      startCall();
+    }
+  };
+
+  const confirmPermissionAndStart = async () => {
+    if (!pendingCallType) return;
+    if (pendingCallType === 'audio') {
+      await handleStartVoiceCall();
+    } else {
+      await handleStartVideoCall();
+    }
+    setPendingCallType(null);
+  };
+
+  const cancelPermissionRequest = () => {
+    setPendingCallType(null);
+  };
+
   const isReady = !!peerId && !!localStream;
+  const canCall = !!peerId;
+
+  const controlButtons = (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/60 backdrop-blur-sm rounded-full p-2">
+      <Button
+        variant={isVoiceOnly ? 'default' : 'secondary'}
+        size="icon"
+        onClick={toggleVoiceOnly}
+        title={isVoiceOnly ? 'Switch to video call' : 'Switch to voice only'}
+        className={isVoiceOnly ? 'bg-blue-500 hover:bg-blue-600' : ''}
+      >
+        {isVoiceOnly ? <Mic size={20} /> : <Smartphone size={20} />}
+      </Button>
+
+      <Button
+        variant={isMuted ? 'destructive' : 'secondary'}
+        size="icon"
+        onClick={toggleMute}
+        title={isMuted ? 'Unmute' : 'Mute'}
+        disabled={isVoiceOnly && isMuted}
+      >
+        {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+      </Button>
+
+      <Button
+        variant={isVideoOff ? 'destructive' : 'secondary'}
+        size="icon"
+        onClick={toggleVideo}
+        title={isVideoOff ? 'Turn on camera' : 'Turn off camera'}
+        disabled={isVoiceOnly}
+        className={isVoiceOnly ? 'opacity-50' : ''}
+      >
+        {isVideoOff ? <VideoOff size={20} /> : <VideoIcon size={20} />}
+      </Button>
+
+      <Button
+        variant="destructive"
+        size="icon"
+        onClick={endCall}
+        title="Disconnect call"
+        disabled={connState === 'idle'}
+        className="ml-1 bg-red-600 hover:bg-red-700 text-white"
+      >
+        <PhoneOff size={20} />
+      </Button>
+    </div>
+  );
 
   return (
     <div className="relative h-full w-full bg-black overflow-hidden flex flex-col">
@@ -295,6 +457,23 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
                  <div className="mt-4 bg-red-500/10 border border-red-500/50 text-red-200 px-4 py-2 rounded-lg text-sm flex items-center justify-center gap-2">
                     <AlertCircle size={16} />
                     {errorMsg}
+                 </div>
+               )}
+
+               {connState === 'idle' && canCall && (
+                 <div className="mt-6 flex justify-center gap-3">
+                   <Button
+                     onClick={() => setPendingCallType('audio')}
+                     className="px-4 py-2 text-sm font-medium"
+                   >
+                     Audio Call
+                   </Button>
+                   <Button
+                     onClick={() => setPendingCallType('video')}
+                     className="px-4 py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700"
+                   >
+                     Video Call
+                   </Button>
                  </div>
                )}
              </div>
@@ -334,70 +513,54 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
               <h3 className="text-2xl font-bold mb-2">Incoming Call</h3>
               <p className="text-gray-400 mb-8">Secure node requesting access...</p>
               <div className="flex gap-4">
-                <Button onClick={endCall} variant="danger" className="flex-1">
+                <Button
+                  onClick={endCall}
+                  variant="danger"
+                  className="flex-1"
+                >
                    Decline
                 </Button>
-                <Button onClick={answerCall} className="bg-green-500 hover:bg-green-600 flex-1">
+                <Button
+                  onClick={answerCall}
+                  className="bg-green-500 hover:bg-green-600 flex-1"
+                >
                    Accept
                 </Button>
               </div>
             </div>
-         </div>
+          </div>
+        )}
+
+      {/* Media permission confirmation popup */}
+      {pendingCallType && (
+        <div className="absolute inset-0 z-60 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="bg-brand-800 p-6 rounded-2xl border border-white/10 shadow-2xl w-full max-w-sm text-center">
+            <h3 className="text-xl font-bold mb-2 text-white">Allow {pendingCallType === 'audio' ? 'microphone' : 'camera & microphone'} access?</h3>
+            <p className="text-gray-300 text-sm mb-6">
+              Your browser will ask for permission to use your {pendingCallType === 'audio' ? 'microphone' : 'camera and microphone'}. You can change this later in browser site settings.
+            </p>
+            <div className="flex gap-3">
+              <Button
+                onClick={cancelPermissionRequest}
+                variant="secondary"
+                className="flex-1"
+              >
+                Decline
+              </Button>
+              <Button
+                onClick={confirmPermissionAndStart}
+                className="flex-1 bg-blue-600 hover:bg-blue-700"
+              >
+                Allow
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Controls Bar */}
-      <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/90 to-transparent z-30">
-        <div className="flex items-center justify-center gap-4 md:gap-8 max-w-lg mx-auto">
-          
-          {connState === 'idle' ? (
-             <Button 
-                onClick={startCall} 
-                disabled={!isReady}
-                className={`w-full py-4 text-lg transition-all ${!isReady ? 'opacity-50 grayscale' : 'bg-green-500 hover:bg-green-600 shadow-green-900/50'}`}
-             >
-                {isReady ? 'Start Secure Call' : 'Initializing...'}
-             </Button>
-          ) : (
-            <>
-              <button 
-                onClick={toggleVideo}
-                className={`p-4 rounded-full backdrop-blur-md border transition-all ${isVideoOff ? 'bg-red-500/80 border-red-500 text-white' : 'bg-white/10 border-white/20 text-white hover:bg-white/20'}`}
-              >
-                {isVideoOff ? <VideoOff size={24} /> : <VideoIcon size={24} />}
-              </button>
-
-              <button 
-                onClick={toggleMute}
-                className={`p-4 rounded-full backdrop-blur-md border transition-all ${isMuted ? 'bg-red-500/80 border-red-500 text-white' : 'bg-white/10 border-white/20 text-white hover:bg-white/20'}`}
-              >
-                {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
-              </button>
-
-              <button 
-                onClick={endCall}
-                className="p-5 rounded-full bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/50 transition-transform hover:scale-105 active:scale-95"
-              >
-                <PhoneOff size={32} />
-              </button>
-
-              <button 
-                onClick={toggleCamera}
-                disabled={connState !== 'connected' && connState !== 'calling'} 
-                className="p-4 rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-white hover:bg-white/20 transition-all active:rotate-180"
-                title="Switch Camera"
-              >
-                <RefreshCw size={24} />
-              </button>
-            </>
-          )}
-
-        </div>
-        <div className="text-center mt-4">
-            <button onClick={onLogout} className="text-xs text-gray-500 underline hover:text-gray-300">
-               Disconnect from Node (Logout)
-            </button>
-        </div>
-      </div>
+      {controlButtons}
     </div>
   );
 };
+
+export default VideoCall;
