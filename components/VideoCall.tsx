@@ -219,7 +219,16 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
   // Watch for remote stream changes
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
+      const videoEl = remoteVideoRef.current;
+      videoEl.srcObject = remoteStream;
+
+      // Some browsers require an explicit play() after a user gesture
+      const playPromise = videoEl.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {
+          // Ignore autoplay errors; user can press play if needed
+        });
+      }
     }
   }, [remoteStream]);
 
