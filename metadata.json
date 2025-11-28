@@ -1,0 +1,8 @@
+{
+  "name": "Secure P2P Video Link",
+  "description": "A secure, two-user video calling application designed for mobile devices with front/back camera support.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
