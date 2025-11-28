@@ -30,6 +30,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
   const [statusMsg, setStatusMsg] = useState('Initializing secure node...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [pendingCallType, setPendingCallType] = useState<'audio' | 'video' | null>(null);
+  const [isRemoteMuted, setIsRemoteMuted] = useState(true);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -230,9 +231,9 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
 
       const videoEl = remoteVideoRef.current;
       videoEl.srcObject = remoteStream;
-      videoEl.muted = false;
+      // Start muted to satisfy autoplay policies; user can unmute via control button
+      videoEl.muted = isRemoteMuted;
 
-      // Some browsers require an explicit play() after a user gesture
       const playPromise = videoEl.play();
       if (playPromise && typeof playPromise.catch === 'function') {
         playPromise.catch(() => {
@@ -240,7 +241,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
         });
       }
     }
-  }, [remoteStream]);
+  }, [remoteStream, isRemoteMuted]);
 
   const toggleCamera = async () => {
     // Determine new mode
@@ -433,6 +434,24 @@ export const VideoCall: React.FC<VideoCallProps> = ({ user, onLogout }) => {
         className={isVoiceOnly ? 'opacity-50' : ''}
       >
         {isVideoOff ? <VideoOff size={20} /> : <VideoIcon size={20} />}
+      </Button>
+
+      <Button
+        variant={isRemoteMuted ? 'secondary' : 'default'}
+        size="icon"
+        onClick={() => {
+          setIsRemoteMuted((prev) => !prev);
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.muted = !remoteVideoRef.current.muted;
+            const playPromise = remoteVideoRef.current.play();
+            if (playPromise && typeof playPromise.catch === 'function') {
+              playPromise.catch(() => {});
+            }
+          }
+        }}
+        title={isRemoteMuted ? 'Unmute remote audio' : 'Mute remote audio'}
+      >
+        {isRemoteMuted ? <MicOff size={20} /> : <Mic size={20} />}
       </Button>
 
       <Button
